@@ -75,9 +75,17 @@ public class Hero : MonoBehaviourPun, IDamageable
     protected bool isTakingDamage = false;
     public float cooldownReductionPercent = 0f;
 
+    //sound
+    protected string attackSound = "Attack";
+    protected string hitSound = "TakeDamage";
+
+    protected AudioSource audioSource;
+    protected AudioClip loadedAttackSound;
+    protected AudioClip loadedHitSound;
+
     protected Dictionary<Hero, float> damageReceivedFrom = new Dictionary<Hero, float>(); // บันทึกดาเมจที่ได้รับจากฮีโร่แต่ละตัว
 
-    public void Start()
+    public virtual void Start()
     {
         ownerPlayer = photonView.Owner;
         Time.timeScale = 1;
@@ -123,6 +131,12 @@ public class Hero : MonoBehaviourPun, IDamageable
             rangeCanvasInstance.SetActive(false); // ซ่อนเริ่มต้น
 
         }
+        //เสียง
+        audioSource = GetComponent<AudioSource>();
+        if (audioSource == null) audioSource = gameObject.AddComponent<AudioSource>();
+
+        loadedAttackSound = Resources.Load<AudioClip>($"Sound/{attackSound}");
+        loadedHitSound = Resources.Load<AudioClip>($"Sound/{hitSound}");
     }
     public void ShowRangeCanvas()
     {
@@ -154,6 +168,22 @@ public class Hero : MonoBehaviourPun, IDamageable
         if (isDead || !photonView.IsMine || isStunned)
         {
             return;
+        }
+            // ป้องกันฮีโร่ตกฉาก
+        if (transform.position.y < -10f)
+        {
+            Vector3 correctedPosition = new Vector3(transform.position.x, 2.0f, transform.position.z);
+            transform.position = correctedPosition;
+
+            // ถ้ามี CharacterController ให้ปิดชั่วคราวเพื่อย้ายตำแหน่ง
+            if (characterController != null)
+            {
+                characterController.enabled = false;
+                transform.position = correctedPosition;
+                characterController.enabled = true;
+            }
+
+            Debug.Log($"{name} ตกฉาก! ย้ายกลับมา y = 2");
         }
         // ตรวจจับการกดปุ่มใช้สกิลหรือโจมตี
         if (Input.GetKeyDown(KeyCode.Alpha1)) { UseSkill(0); }
@@ -267,6 +297,16 @@ public class Hero : MonoBehaviourPun, IDamageable
             // หมุนตัวละครแบบนุ่มนวล
             transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * speed);
 
+            // หา GameObject ที่ชื่อ "Health" ซึ่งเป็นลูกของฮีโร่
+            // Transform healthBar = transform.Find("Health");
+            // if (healthBar != null)
+            // {
+            //     // คำนวณองศาที่เปลี่ยนไปของฮีโร่
+            //     float rotationDelta = transform.rotation.eulerAngles.y - previousYRotation;
+
+            //     // หมุนแกน Y ของ Health Bar ไปในทิศตรงกันข้าม
+            //     healthBar.Rotate(0, -rotationDelta, 0);
+            // }
         }
     }
     public void PlayAnimation(string animationTrigger)
@@ -309,6 +349,10 @@ public class Hero : MonoBehaviourPun, IDamageable
                 IDamageable target = collider.GetComponent<IDamageable>();
                 if (target != null && target != this && !IsOnSameTeamAs(target))
                 {
+                    if (loadedAttackSound != null)
+                    {
+                        audioSource.PlayOneShot(loadedAttackSound);
+                    }
                     if (isAttackinPhysical)
                     {
                         target.TakeDamage(attackDamage, this, DamageType.Physical);
@@ -384,7 +428,11 @@ public class Hero : MonoBehaviourPun, IDamageable
         isWarping = false;
 
         float defenseValue = 0f;
-
+        if (loadedAttackSound != null)
+        {
+            audioSource.PlayOneShot(loadedHitSound);
+        }
+        
         if (attacker is Hero attackerHero) // ถ้าโจมตีโดย Hero
         {
             if (damageType == DamageType.Physical)
@@ -481,9 +529,14 @@ public class Hero : MonoBehaviourPun, IDamageable
                     float totalDamageDealt = entry.Value;
 
                     // หากดาเมจที่ทำไปมากกว่า 30% ของ maxHealth ของเป้าหมาย ถือว่าเป็น Assist
-                    if (totalDamageDealt >= maxHealth * 0.3f && assistingHero != attackerHero)
+                    if (totalDamageDealt >= maxHealth * 0.1f && assistingHero != attackerHero)
                     {
                         assistingHero.photonView.RPC("RPC_UpdateAssistCount", RpcTarget.All, assistingHero.assistCount + 1);
+                    }
+                    PhotonView gameManagerPV = GameManager.instance.photonView;
+                    if (gameManagerPV != null)
+                    {
+                        gameManagerPV.RPC("RPC_RequestAddKillToTeam", RpcTarget.MasterClient, attackerTeam);
                     }
                 }
             }
@@ -491,30 +544,49 @@ public class Hero : MonoBehaviourPun, IDamageable
             {
                 attackerTeam = attackerTower.towerTeam;
                 KillCanvasPopup.instance.CreateKillPopup("Tower", this.heroImage.name);
+                PhotonView gameManagerPV = GameManager.instance.photonView;
+                if (gameManagerPV != null)
+                {
+                    gameManagerPV.RPC("RPC_RequestAddKillToTeam", RpcTarget.MasterClient, attackerTeam);
+                }
             }
             else if (lastAttacker is Minion attackerMinion)
             {
                 attackerTeam = attackerMinion.minionTeam;
                 KillCanvasPopup.instance.CreateKillPopup("Minion", this.heroImage.name);
+
+                PhotonView gameManagerPV = GameManager.instance.photonView;
+                if (gameManagerPV != null)
+                {
+                    gameManagerPV.RPC("RPC_RequestAddKillToTeam", RpcTarget.MasterClient, attackerTeam);
+                }
+
             }
             else if (lastAttacker is NPC attackerNPC)
             {
                 string[] parts = attackerNPC.name.Split('_');
                 string npcName = parts[0];
-                KillCanvasPopup.instance.CreateKillPopup(npcName, this.heroImage.name);
-                attackerTeam = TeamManager.instance.GetTeam(ownerPlayer) == Team.Red ? Team.Blue : Team.Red;
-            }
-            else
-            {
-                return;
+                KillCanvasPopup.instance.CreateKillPopup(npcName, this.heroName);
+
+                // หาทีมตรงข้าม
+                Team victimTeam = TeamManager.instance.GetTeam(ownerPlayer);
+                Team oppositeTeam = (victimTeam == Team.Red) ? Team.Blue : Team.Red;
+
+                PhotonView gameManagerPV = GameManager.instance.photonView;
+                if (gameManagerPV != null)
+                {
+                    gameManagerPV.RPC("RPC_RequestAddKillToTeam", RpcTarget.MasterClient, oppositeTeam);
+                }
             }
 
-            if (PhotonNetwork.IsMasterClient)
-            {
-                GameManager.instance.AddKillToTeam(attackerTeam);
-            }
+
+            //if (PhotonNetwork.IsMasterClient)
+            //{
+                //GameManager.instance.AddKillToTeam(attackerTeam);
+            //}
         }
     }
+
     [PunRPC]
     public void RPC_RequestRespawn()
     {
@@ -981,7 +1053,7 @@ public void RPC_OnRespawn(Vector3 spawnPosition, float health)
         GameObject pooledEffect = EffectManager.instance.PlayEffect(effectName, position, duration);
         if (pooledEffect == null)
         {
-            Debug.LogError($" ไม่พบเอฟเฟค {effectName} ใน EffectManager!");
+            Debug.Log($" ไม่พบเอฟเฟค {effectName} ใน EffectManager!");
             return;
         }
 
